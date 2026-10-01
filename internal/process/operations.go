@@ -9,6 +9,7 @@ import (
 	"github.com/wyw14/cry-97/internal/aeration"
 	"github.com/wyw14/cry-97/internal/dosing"
 	"github.com/wyw14/cry-97/internal/model"
+	"github.com/wyw14/cry-97/internal/sensor"
 	"github.com/wyw14/cry-97/internal/settling"
 )
 
@@ -44,11 +45,22 @@ func (p *Plant) UpdateBlanket(lineID model.LineID, level float64) (settling.Snap
 	return state.UpdateBlanket(level, 2.8, p.now()), nil
 }
 
-func (p *Plant) ReceiveSample(ctx context.Context, sample model.Sample) error {
-	if err := p.receiver.Receive(ctx, sample, p.now()); err != nil {
-		return err
+// ReceiveSample accepts one sensor sample. The receiver is the single admission
+// gate: only a sample that was durably stored and advanced the line cursor is
+// published to real-time subscribers. A stale sequence (already covered by the
+// cursor, even with a different sample kind) is acknowledged without any event,
+// cursor movement, publication, or alarm side effect.
+func (p *Plant) ReceiveSample(ctx context.Context, sample model.Sample) (sensor.Receipt, error) {
+	receipt, err := p.receiver.Receive(ctx, sample, p.now())
+	if err != nil {
+		return receipt, err
 	}
-	return p.sampler.Publish(sample)
+	if receipt.Stored {
+		if err := p.sampler.Publish(receipt.Sample); err != nil {
+			return receipt, err
+		}
+	}
+	return receipt, nil
 }
 
 func (p *Plant) BeginSettling(lineID model.LineID) (settling.Cycle, error) {

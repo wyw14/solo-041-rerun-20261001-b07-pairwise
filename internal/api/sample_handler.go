@@ -18,6 +18,13 @@ type sampleRequest struct {
 	ObservedAt string  `json:"observed_at"`
 }
 
+type sampleResponse struct {
+	Sample    model.Sample `json:"sample"`
+	Stored    bool         `json:"stored"`
+	Duplicate bool         `json:"duplicate"`
+	Cursor    uint64       `json:"cursor"`
+}
+
 func (s *Server) receiveSample(w http.ResponseWriter, r *http.Request) {
 	var input sampleRequest
 	if err := decodeJSON(r, &input); err != nil {
@@ -43,11 +50,20 @@ func (s *Server) receiveSample(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sample := model.NewSample(lineID, input.BasinID, kind, input.Sequence, input.Value, input.Unit, observedAt)
-	if err := s.plant.ReceiveSample(r.Context(), sample); err != nil {
+	receipt, err := s.plant.ReceiveSample(r.Context(), sample)
+	if err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, sample)
+	// A stale/duplicate sequence is acknowledged idempotently: the request
+	// still succeeds, but nothing was stored or pushed to real-time consumers.
+	response := sampleResponse{Sample: receipt.Sample, Stored: receipt.Stored, Cursor: receipt.Cursor}
+	if receipt.Stored {
+		writeJSON(w, http.StatusAccepted, response)
+		return
+	}
+	response.Duplicate = true
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) labResult(w http.ResponseWriter, r *http.Request) {
