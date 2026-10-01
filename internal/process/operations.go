@@ -45,8 +45,14 @@ func (p *Plant) UpdateBlanket(lineID model.LineID, level float64) (settling.Snap
 }
 
 func (p *Plant) ReceiveSample(ctx context.Context, sample model.Sample) error {
-	if err := p.receiver.Receive(ctx, sample, p.now()); err != nil {
+	accepted, err := p.receiver.Receive(ctx, sample, p.now())
+	if err != nil {
 		return err
+	}
+	if !accepted {
+		// Expired/duplicate sequence: it was neither stored nor committed, so it
+		// must not reach live subscribers or trigger realtime side effects.
+		return nil
 	}
 	return p.sampler.Publish(sample)
 }

@@ -3,7 +3,6 @@ package journal
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,43 +10,64 @@ import (
 	"github.com/wyw14/cry-97/internal/model"
 )
 
+// CursorStore persists the last accepted sample sequence for every
+// (line, sample kind) pair. Each sample kind carries its own monotonically
+// increasing sequence, so the durable cursor tracks them independently.
 type CursorStore struct {
 	path string
 	mu   sync.Mutex
-	data map[model.LineID]uint64
+	data map[model.LineID]map[model.SampleKind]uint64
 }
 
 func NewCursorStore(path string) (*CursorStore, error) {
 	if path == "" {
 		return nil, errors.New("cursor path is required")
 	}
-	store := &CursorStore{path: path, data: make(map[model.LineID]uint64)}
+	store := &CursorStore{path: path, data: make(map[model.LineID]map[model.SampleKind]uint64)}
 	if err := store.load(); err != nil {
 		return nil, err
 	}
 	return store, nil
 }
 
-func (s *CursorStore) Current(lineID model.LineID) uint64 {
+func (s *CursorStore) Current(lineID model.LineID, kind model.SampleKind) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.data[lineID]
+	return s.data[lineID][kind]
 }
 
-func (s *CursorStore) Commit(lineID model.LineID, sequence uint64) error {
-	if lineID == "" || sequence == 0 {
+// LineCursors returns a copy of every per-kind cursor for a line.
+func (s *CursorStore) LineCursors(lineID model.LineID) map[model.SampleKind]uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make(map[model.SampleKind]uint64)
+	for kind, value := range s.data[lineID] {
+		result[kind] = value
+	}
+	return result
+}
+
+func (s *CursorStore) Commit(lineID model.LineID, kind model.SampleKind, sequence uint64) error {
+	if lineID == "" || kind == "" || sequence == 0 {
 		return errors.New("cursor identity is incomplete")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if sequence <= s.data[lineID] {
+	if byKind := s.data[lineID]; sequence <= byKind[kind] {
 		return nil
 	}
-	next := make(map[model.LineID]uint64, len(s.data)+1)
-	for key, value := range s.data {
-		next[key] = value
+	next := make(map[model.LineID]map[model.SampleKind]uint64, len(s.data)+1)
+	for existingLine, existingKinds := range s.data {
+		clonedKinds := make(map[model.SampleKind]uint64, len(existingKinds)+1)
+		for existingKind, value := range existingKinds {
+			clonedKinds[existingKind] = value
+		}
+		next[existingLine] = clonedKinds
 	}
-	next[lineID] = sequence
+	if next[lineID] == nil {
+		next[lineID] = make(map[model.SampleKind]uint64)
+	}
+	next[lineID][kind] = sequence
 	if err := writeCursorFile(s.path, next); err != nil {
 		return err
 	}
@@ -63,13 +83,10 @@ func (s *CursorStore) load() error {
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal(data, &s.data); err != nil {
-		return fmt.Errorf("decode cursor file: %w", err)
-	}
-	return nil
+	return json.Unmarshal(data, &s.data)
 }
 
-func writeCursorFile(path string, value map[model.LineID]uint64) error {
+func writeCursorFile(path string, value map[model.LineID]map[model.SampleKind]uint64) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
